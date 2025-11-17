@@ -1,0 +1,177 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/shm.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <string.h>
+
+#define MAX_MOVIES 2000
+#define SHM_SIZE (2 * MAX_MOVIES * sizeof(struct MovieStats))
+#define MAX_LINE_LENGTH 2560
+
+struct MovieStats {
+    int movieId;
+    double sum;
+    int count;
+    double avg;
+};
+
+void processFile(const char* filename, struct MovieStats* sharedMemory, int offset) {
+    FILE* file = fopen(filename, "r");
+    if (!file) {
+        perror("Error opening file");
+        exit(1);
+    }
+
+    char line[MAX_LINE_LENGTH];
+    int userId, movieId, rating, timestamp;
+
+    printf("Process %d is reading file: %s\n", getpid(), filename);
+
+    while (fgets(line, MAX_LINE_LENGTH, file) != NULL) {
+        if (sscanf(line, "%d\t%d\t%d\t%d", &userId, &movieId, &rating, &timestamp) == 4) {
+            if (movieId > 0 && movieId <= MAX_MOVIES) {
+                sharedMemory[offset + movieId - 1].movieId = movieId;
+                sharedMemory[offset + movieId - 1].sum += rating;
+                sharedMemory[offset + movieId - 1].count++;
+                sharedMemory[offset + movieId - 1].avg = 
+                    sharedMemory[offset + movieId - 1].sum / sharedMemory[offset + movieId - 1].count;
+            }
+        }
+    }
+
+    fclose(file);
+    printf("Process %d finished reading file: %s\n", getpid(), filename);
+}
+
+void printFileStats(struct MovieStats* sharedMemory, int offset, const char* filename, int* totalMovies, double* totalRating, FILE* outputFile) {
+    fprintf(outputFile, "\nResults for %s:\n", filename);
+    fprintf(outputFile, "MovieID\tAverage Rating\tNumber of Ratings\n");
+    fprintf(outputFile, "----------------------------------------\n");
+    
+    *totalMovies = 0;
+    *totalRating = 0;
+    
+    for (int i = 0; i < MAX_MOVIES; i++) {
+        if (sharedMemory[offset + i].count > 0) {
+            fprintf(outputFile, "%d\t%.2f\t\t%d\n", 
+                    sharedMemory[offset + i].movieId, 
+                    sharedMemory[offset + i].avg, 
+                    sharedMemory[offset + i].count);
+            (*totalMovies)++;
+            *totalRating += sharedMemory[offset + i].avg;
+        }
+    }
+    if (*totalMovies > 0) {
+        double overallAverage = *totalRating / *totalMovies;
+        fprintf(outputFile, "\nSummary:\n");
+        fprintf(outputFile, "Total movies rated: %d\n", *totalMovies);
+        fprintf(outputFile, "Average rating across all movies: %.2f\n", overallAverage);
+    } else {
+        fprintf(outputFile, "\nSummary:\n");
+        fprintf(outputFile, "No movies rated.\n");
+    }
+}
+
+void mergeAndPrintResults(struct MovieStats* sharedMemory, int* totalMovies, double* totalRating, FILE* outputFile) {
+    fprintf(outputFile, "\nMerged Results:\n");
+    fprintf(outputFile, "MovieID\tAverage Rating\tNumber of Ratings\n");
+    fprintf(outputFile, "----------------------------------------\n");
+
+    *totalMovies = 0;
+    *totalRating = 0;
+
+    for (int i = 0; i < MAX_MOVIES; i++) {
+        int count1 = sharedMemory[i].count;
+        int count2 = sharedMemory[MAX_MOVIES + i].count;
+
+        if (count1 > 0 || count2 > 0) {
+            int totalCount = count1 + count2;
+            double totalSum = sharedMemory[i].sum + sharedMemory[MAX_MOVIES + i].sum;
+            double avgRating = totalSum / totalCount;
+
+            fprintf(outputFile, "%d\t%.2f\t\t%d\n", i + 1, avgRating, totalCount);
+
+            (*totalMovies)++;
+            *totalRating += avgRating;
+        }
+    }
+}
+
+int main(int argc, char* argv[]) {
+    if (argc != 3) {
+        printf("Usage: %s <file1> <file2>\n", argv[0]);
+        return 1;
+    }
+
+    int shmid = shmget(IPC_PRIVATE, SHM_SIZE, IPC_CREAT | 0666);
+    if (shmid < 0) {
+        perror("shmget");
+        exit(1);
+    }
+
+    struct MovieStats* sharedMemory = (struct MovieStats*)shmat(shmid, NULL, 0);
+    if (sharedMemory == (void*)-1) {
+        perror("shmat");
+        exit(1);
+    }
+
+    memset(sharedMemory, 0, SHM_SIZE);
+
+    pid_t pid1 = fork();
+    if (pid1 < 0) {
+        perror("Fork failed");
+        exit(1);
+    }
+
+    if (pid1 == 0) {  
+        processFile(argv[1], sharedMemory, 0);
+        exit(0);
+    } else {
+        pid_t pid2 = fork();
+        if (pid2 < 0) {
+            perror("Fork failed");
+            exit(1);
+        }
+
+        if (pid2 == 0) {   
+            processFile(argv[2], sharedMemory, MAX_MOVIES);
+            exit(0);
+        } else {
+            waitpid(pid1, NULL, 0);
+            waitpid(pid2, NULL, 0); 
+            FILE* file1Output = fopen("results_file1.txt", "w");
+            FILE* file2Output = fopen("results_file2.txt", "w");
+            FILE* mergedOutput = fopen("results_merged.txt", "w");
+
+            if (!file1Output || !file2Output || !mergedOutput) {
+                perror("Error opening output files");
+                exit(1);
+            }
+
+            int totalMovies1, totalMovies2;
+            double totalRating1, totalRating2; 
+
+            printFileStats(sharedMemory, 0, argv[1], &totalMovies1, &totalRating1, file1Output);
+            printFileStats(sharedMemory, MAX_MOVIES, argv[2], &totalMovies2, &totalRating2, file2Output);
+ 
+            int totalMoviesMerged;
+            double totalRatingMerged;
+            mergeAndPrintResults(sharedMemory, &totalMoviesMerged, &totalRatingMerged, mergedOutput);
+ 
+            fprintf(mergedOutput, "\nSummary for merged results:\n");
+            fprintf(mergedOutput, "Total movies rated: %d\n", totalMoviesMerged);
+            fprintf(mergedOutput, "Average rating across all movies: %.2f\n", totalRatingMerged / totalMoviesMerged);
+
+            // Đóng các tệp
+            fclose(file1Output);
+            fclose(file2Output);
+            fclose(mergedOutput);
+
+            shmdt(sharedMemory);
+            shmctl(shmid, IPC_RMID, NULL);
+        }
+    }
+
+    return 0;
+}
