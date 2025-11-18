@@ -4,7 +4,7 @@ import { AuthContextProvider } from "./context/AuthContext.jsx"; // Thêm .jsx
 import ProtectedRoute from "./components/ProtectedRoute.jsx"; // Thêm .jsx
 
 // Sửa các dòng import Pages
-import LoginPage from "/pages/LoginPage.jsx";      // <--- THÊM ĐUÔI FILE .jsx
+import LoginPage from "./pages/LoginPage.jsx";     // <--- THÊM ĐUÔI FILE .jsx
 import ProfilePage from "./pages/ProfilePage.jsx";  // <--- THÊM ĐUÔI FILE .jsx
 import NotFound from "./pages/NotFound.jsx";
 
